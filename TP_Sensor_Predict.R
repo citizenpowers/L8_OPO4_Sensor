@@ -15,7 +15,8 @@ library(ggrepel)
 library(ggpmisc)
 library(lubridate)
 library(dbhydroR)
-
+library(ggthemr)
+library(tidyquant)
 
 # Import Data -------------------------------------------------------------
 
@@ -24,22 +25,37 @@ lm_OPO4_TURBIDITY_fit_top <- readRDS("Data/lm_OPO4_TURBIDITY_fit_top.rds")     #
 L8_Sensor_data <-read_csv("Data/fts-data_2023-11-01T05_44_00.000Z_2023-12-19T13_44_00.000Z.csv")  #Imports sensor data
 Provisional_Data <- read_excel("Data/Provisional Data.xlsx") #import provisional data
 Compliance_data <- get_wq(station_id= c("G539","G538"), date_min = "2001-03-01",date_max=as.character(today()),test_name =c("PHOSPHATE, TOTAL AS P",	"TOTAL NITROGEN",	"TEMP",	"SP CONDUCTIVITY, FIELD",	"DISSOLVED OXYGEN",	"PH, FIELD","NITRATE-N","KJELDAHL NITROGEN, TOTAL",	"PHOSPHATE, ORTHO AS P",	"NITRATE+NITRITE-N",	"NITRITE-N",	"CHLORIDE",	"TURBIDITY"	,"TOTAL DISSOLVED SOLIDS", "IRON, TOTAL","SULFATE"),raw=TRUE) #DBHYDRO WQ at compliance site
-
+Manual_Download_December_2023 <- read_excel("Data/Manual Download December 2023.xlsx")
 
 # Tidy Data ---------------------------------------------------------------
 
+
+#Manual Download when GPS 360 Failed
+Manual_Download_December_2023_tidy <- Manual_Download_December_2023 %>%
+mutate(Date=ISOdate(year(Date),month(Date),day(Date),hour(Time),minute(Time),second(Time))) %>%
+rename(`mPO4`="CAPO4",`mQC`="Overall Flag") %>%
+select(Date,`mPO4`,`mQC`) %>%
+mutate(mPO4=as.numeric(mPO4)) %>%
+filter(Date> "2023-12-19 13:43:00")
+
+L8_Sensor_data_combined <- L8_Sensor_data %>%
+bind_rows(Manual_Download_December_2023_tidy)
+
+
 #tidy sensor data
-L8_Sensor_data_tidy <- L8_Sensor_data %>%
+L8_Sensor_data_tidy <- L8_Sensor_data_combined  %>%
 mutate(Date=ymd_hms(Date)) %>%
 mutate(date=as.Date(Date),Hour=hour(Date)) %>%
 rename(`PHOSPHATE, ORTHO AS P`="mPO4",TURBIDITY="Turb",DATE="Date") %>%
 mutate(`QC Flag`=case_when(TURBIDITY>100~"Turbidity out of range",
+                           is.na(TURBIDITY)~"Turbidity data missing",
                            `PHOSPHATE, ORTHO AS P`<0~"OPO4 Sensor out of range",
-                           `mQC`>1~"OPO4 Sensor Failed QC")) 
+                           `mQC`>1~"OPO4 Sensor Failed QC")) %>%
+mutate(TURBIDITY=ifelse(is.na(TURBIDITY),0,TURBIDITY))
 
 #Predict TP from sensor
 L8_Sensor_data_tidy_predictions <- L8_Sensor_data_tidy %>%
-bind_cols(predict(lm_OPO4_TURBIDITY_fit_top ,newdata = L8_Sensor_data_tidy, interval = "prediction")) %>%
+bind_cols(predict(lm_OPO4_TURBIDITY_fit_all_data ,newdata = L8_Sensor_data_tidy, interval = "prediction")) %>%
 rename(`Predicted TP`="fit") 
 
 #tidy compliance data- Passed QC
@@ -48,8 +64,7 @@ filter(Sample.Type.New=="SAMP",Station.ID %in% c("G539","G538") ,Test.Name %in% 
 mutate(Hour=hour(dmy_hm(Collection_Date))) %>%
 mutate(date=as.Date(dmy_hm(Collection_Date))) %>%
 pivot_wider(names_from=c(Test.Name,Station.ID),values_from=Value) %>%
-select(date,Hour,`PHOSPHATE, TOTAL AS P_G538`,`PHOSPHATE, TOTAL AS P_G539`,`PHOSPHATE, ORTHO AS P_G539`) 
-#%>%
+select(date,Hour,`PHOSPHATE, TOTAL AS P_G538`,`PHOSPHATE, TOTAL AS P_G539`,`PHOSPHATE, ORTHO AS P_G539`) #%>%
 rename(`PHOSPHATE, ORTHO AS P (Compliance)`="PHOSPHATE, ORTHO AS P",`PHOSPHATE, Total AS P (Compliance)`="PHOSPHATE, TOTAL AS P")
 
 #Tidy Provisional Data
@@ -111,3 +126,19 @@ geom_point(aes(x =`Date Time`, y = `PHOSPHATE, ORTHO AS P (Provisional)`*1000),f
 theme_bw()+scale_y_continuous(breaks = pretty_breaks(n=10))+coord_cartesian(xlim=c(Sys.time()-weeks(2),Sys.time()))+scale_x_datetime(breaks = pretty_breaks(n=7))+
 labs(y= expression(Predicted~TP~mu~L^-1),x="Date", title = "OPO4 sensor data and provisional compliance data at L-8 FEB discharge",caption = "OPO4 compliance in red. Sensor data in blue.")
 
+#Presentation Figures
+
+ggthemr("dust", type="outer", layout="scientific", spacing=2)
+Presentation_theme <- theme(strip.text = element_text(size=20) ,legend.position="bottom",axis.text=element_text(size=16),axis.title = element_text(size = 20),legend.text = element_text(size = 24),legend.title = element_text(size = 20),title = element_text(size = 24))
+
+
+#
+ggplot(filter(Sensor_Compliance_Data_Tidy,if_else(is.na(`QC Flag`) | `QC Flag`=="Turbidity data missing" ,T,F),`Date Time`>= "2023-12-01 00:00:00" ,`Date Time`< "2023-12-31 24:00:00") ,aes(x =`Date Time`, y = `Predicted TP`*1000))+geom_point(shape=21,fill="violet",size=2.5)+
+geom_ribbon(aes(ymin=lwr*1000,ymax=upr*1000),alpha=.4)+geom_line(linetype="dashed",alpha=.5)+
+geom_point(aes(x =`Date Time`, y = `PHOSPHATE, Total AS P (Provisional)`*1000),size=3,shape=21,fill="blue")+
+scale_y_continuous(breaks = pretty_breaks(n=10))+Presentation_theme+
+scale_x_datetime(date_labels = "%b %d",breaks = ymd_hms(c("2023-12-01 12:00:00","2023-12-08 00:00:00","2023-12-15 00:00:00","2023-12-22 00:00:00","2023-12-29 00:00:00")))+
+labs(y= expression(Predicted~TP~mu~L^-1),x="", title = "Predicted TP at L-8 FEB discharge December 2023")
+ 
+
+ggsave("Figures/Predicted TP December.jpeg",plot = last_plot(), width = 16, height = 9, units = "in")
